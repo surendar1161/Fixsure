@@ -1,0 +1,3040 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Fixsure API",
+    "version": "1.0.0",
+    "summary": "Photo-verified home-repair escrow on PayPal, for single repairs and crew projects.",
+    "description": "Fixsure keeps the customer's money as a PayPal authorization (Orders v2, intent AUTHORIZE) and captures it only when a photo proves the work.\n\n**Repairs.** A vision model prices the before photo. The customer places the hold. The technician posts an after photo. If the model finds the same job, a resolved issue, and confidence of at least 0.82, the hold is captured and the technician is paid with PayPal Payouts. Anything else goes to a staff reviewer.\n\n**Projects.** A planning agent splits the request into 2 to 6 milestones, books crew by trade on working days, and sets how each milestone is verified: `ai` up to `MILESTONE_HUMAN_REVIEW_ABOVE_USD` (default $400), `ai_then_human` above it, and `human` for steps a photo cannot prove. One authorization covers the total. Each proven milestone is a partial capture followed by a payout to its crew member. Stopping a project voids whatever is still held.\n\n**Authentication.** Send a key as `Authorization: Bearer <key>`. Each job has a customer key and, for repairs, a technician key. Each crew member has a portal key that only reaches milestones booked to them. Staff endpoints take the server's staff key, or the staff cookie from `POST /api/v1/session` with a same-origin `Origin` header on writes. A key that does not belong to the job gets a 404, so ids cannot be probed.\n\n**Errors** use RFC 9457 `application/problem+json`. Creates return 201 with a `Location` header.\n\nThe high-level and low-level design, with diagrams, are in the Design guides of the APIMatic portal and at `/docs/design/hld` and `/docs/design/lld` on any Fixsure server.",
+    "license": {
+      "name": "MIT",
+      "identifier": "MIT"
+    }
+  },
+  "servers": [
+    {
+      "url": "http://localhost:3000",
+      "description": "Local"
+    },
+    {
+      "url": "https://{service}.onrender.com",
+      "description": "Render",
+      "variables": {
+        "service": {
+          "default": "fixsure"
+        }
+      }
+    }
+  ],
+  "tags": [
+    {
+      "name": "Jobs",
+      "description": "Create and read jobs. A job is a single repair, or a project when it has milestones."
+    },
+    {
+      "name": "Hold",
+      "description": "The PayPal authorization held against a job, placed and cancelled by the customer."
+    },
+    {
+      "name": "Proof",
+      "description": "The technician's after photo on a repair, and the AI verdict on it."
+    },
+    {
+      "name": "Review",
+      "description": "Staff decisions on repairs the model could not auto-release, plus stopping a project with void."
+    },
+    {
+      "name": "Meta",
+      "description": "Health, this document, and the staff browser session."
+    },
+    {
+      "name": "Projects",
+      "description": "Multi-milestone projects planned by the AI agent, with crew booked by trade."
+    },
+    {
+      "name": "Milestones",
+      "description": "Proof per milestone, verification by amount, partial PayPal captures, and per-crew payouts."
+    },
+    {
+      "name": "Crew",
+      "description": "The crew roster and each crew member's own feed of milestones and earnings."
+    },
+    {
+      "name": "Dispatch",
+      "description": "Bryntum schedule data and the AI dispatch copilot with PayPal Agent Toolkit tools."
+    }
+  ],
+  "security": [
+    {
+      "jobKey": []
+    }
+  ],
+  "paths": {
+    "/api/v1/health": {
+      "get": {
+        "tags": [
+          "Meta"
+        ],
+        "operationId": "getHealth",
+        "summary": "Health check",
+        "description": "Used by the Render health check. Reports which integrations are live and which run in demo or fallback mode.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Service is up.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/openapi.json": {
+      "get": {
+        "tags": [
+          "Meta"
+        ],
+        "operationId": "getOpenApi",
+        "summary": "This document",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.1 document.",
+            "content": {
+              "application/json": {}
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/jobs": {
+      "get": {
+        "tags": [
+          "Jobs"
+        ],
+        "operationId": "listJobs",
+        "summary": "List jobs (staff)",
+        "security": [
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Comma-separated statuses to include.",
+            "schema": {
+              "type": "string",
+              "examples": [
+                "review,funded"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Jobs, newest first.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": [
+                    "data",
+                    "count"
+                  ],
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/JobRow"
+                      }
+                    },
+                    "count": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Jobs"
+        ],
+        "operationId": "createJob",
+        "summary": "Create a job from a photo",
+        "description": "Stores the before photo and prices the repair with the vision model. The response is the customer's view, and `links.customer` carries the customer key.",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "customerName",
+                  "city",
+                  "description",
+                  "photo"
+                ],
+                "properties": {
+                  "customerName": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 80
+                  },
+                  "city": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 80
+                  },
+                  "description": {
+                    "type": "string",
+                    "minLength": 8,
+                    "maxLength": 500
+                  },
+                  "photo": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "JPG, PNG, or WebP under 5 MB."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/JobCreated"
+          },
+          "413": {
+            "$ref": "#/components/responses/TooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMedia"
+          },
+          "422": {
+            "$ref": "#/components/responses/Validation"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/sample": {
+      "post": {
+        "tags": [
+          "Jobs"
+        ],
+        "operationId": "createSampleJob",
+        "summary": "Create the sample faucet job",
+        "description": "Creates a job from the bundled before photo, so the flow can be tried without uploading.",
+        "security": [],
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/JobCreated"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/JobId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "Jobs"
+        ],
+        "operationId": "getJob",
+        "summary": "Get a job",
+        "description": "The shape depends on the caller. Technicians do not see the customer's name, and customers do not see the technician link.",
+        "security": [
+          {
+            "jobKey": []
+          },
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Job"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/hold": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/JobId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "Hold"
+        ],
+        "operationId": "placeHold",
+        "summary": "Authorize the PayPal hold (customer)",
+        "description": "With PayPal keys, this creates an Orders v2 order with intent AUTHORIZE and answers 202. Send the customer to `hold.approveUrl`; PayPal returns them to `/api/v1/paypal/return`, which authorizes the order. Without keys, the job is funded in demo mode and the answer is 200.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Job"
+          },
+          "202": {
+            "description": "Waiting for the customer to approve on PayPal.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Job"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "502": {
+            "$ref": "#/components/responses/Upstream"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Hold"
+        ],
+        "operationId": "cancelHold",
+        "summary": "Cancel the hold before proof is submitted (customer)",
+        "description": "Voids the PayPal authorization. Not allowed once the technician has uploaded an after photo.",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Job"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/proof": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/JobId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "Proof"
+        ],
+        "operationId": "submitProof",
+        "summary": "Upload the after photo (technician)",
+        "description": "The vision model compares the before and after photos. A passing verdict captures the hold and sends the payout; anything else moves the job to review. An after photo identical to the before photo is rejected.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "photo"
+                ],
+                "properties": {
+                  "photo": {
+                    "type": "string",
+                    "format": "binary"
+                  },
+                  "email": {
+                    "type": "string",
+                    "format": "email",
+                    "description": "PayPal email for the payout. Required when PayPal is connected."
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/JobChecked"
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/TooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMedia"
+          },
+          "422": {
+            "$ref": "#/components/responses/Validation"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/proof/sample": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/JobId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "Proof"
+        ],
+        "operationId": "submitSampleProof",
+        "summary": "Submit the bundled after photo on a sample job (technician)",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/JobChecked"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Validation"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/photos/{slot}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/JobId"
+        },
+        {
+          "name": "slot",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "before",
+              "after"
+            ]
+          }
+        },
+        {
+          "name": "k",
+          "in": "query",
+          "description": "Job key, for `<img>` tags that cannot send headers.",
+          "schema": {
+            "type": "string"
+          }
+        }
+      ],
+      "get": {
+        "tags": [
+          "Proof"
+        ],
+        "operationId": "getPhoto",
+        "summary": "Read a job photo",
+        "security": [
+          {
+            "jobKey": []
+          },
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The image.",
+            "content": {
+              "image/png": {},
+              "image/jpeg": {},
+              "image/webp": {}
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/similar": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/JobId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "Review"
+        ],
+        "operationId": "getSimilarJobs",
+        "summary": "Similar past jobs and their prices (staff)",
+        "description": "Uses an Elastic `more_like_this` query when Elastic is configured, and ranks the local ledger otherwise.",
+        "security": [
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Similar jobs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Similar"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/release": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/JobId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "Review"
+        ],
+        "operationId": "releaseJob",
+        "summary": "Accept the repair and capture the hold (staff)",
+        "security": [
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Job"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/void": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/JobId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "Review"
+        ],
+        "operationId": "voidJob",
+        "summary": "Return the hold to the customer (staff)",
+        "security": [
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Job"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "502": {
+            "$ref": "#/components/responses/Upstream"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/reopen": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/JobId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "Review"
+        ],
+        "operationId": "reopenJob",
+        "summary": "Ask the technician for a new after photo (staff)",
+        "security": [
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Job"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/payout/retry": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/JobId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "Review"
+        ],
+        "operationId": "retryPayout",
+        "summary": "Retry a failed technician payout (staff)",
+        "description": "The same email reuses the PayPal idempotency key, so a payout that went through is never sent twice. A new email is a new payout.",
+        "security": [
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "email": {
+                    "type": "string",
+                    "format": "email"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Job"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Validation"
+          }
+        }
+      }
+    },
+    "/api/v1/paypal/return": {
+      "get": {
+        "tags": [
+          "Hold"
+        ],
+        "operationId": "paypalReturn",
+        "summary": "PayPal approval return URL",
+        "description": "PayPal redirects the buyer here with `token` (the order id). The server checks that the order belongs to the job and matches the price, authorizes it, and redirects with 303 to the customer's job page.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "job",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "k",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "token",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "303": {
+            "description": "Redirect to the job page."
+          }
+        }
+      }
+    },
+    "/api/v1/session": {
+      "post": {
+        "tags": [
+          "Meta"
+        ],
+        "operationId": "createStaffSession",
+        "summary": "Staff sign-in for the browser desks",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "key"
+                ],
+                "properties": {
+                  "key": {
+                    "type": "string"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "Signed in. Sets an httpOnly `fixsure_staff` cookie."
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          },
+          "422": {
+            "$ref": "#/components/responses/Validation"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "Meta"
+        ],
+        "operationId": "deleteStaffSession",
+        "summary": "Sign out",
+        "security": [],
+        "responses": {
+          "204": {
+            "description": "Signed out."
+          }
+        }
+      }
+    },
+    "/api/v1/projects": {
+      "post": {
+        "tags": [
+          "Projects"
+        ],
+        "operationId": "createProject",
+        "summary": "Plan a project into milestones and book crew",
+        "description": "The planning agent (Vercel AI SDK generateObject with the photo) writes 2 to 6 priced milestones. Crew are assigned by trade and least load, laid out on working days, and each milestone gets a verification mode by amount. Without OPENAI_API_KEY a template plan is used.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "customerName",
+                  "city",
+                  "description",
+                  "photo"
+                ],
+                "properties": {
+                  "customerName": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 80
+                  },
+                  "city": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 80
+                  },
+                  "description": {
+                    "type": "string",
+                    "minLength": 12,
+                    "maxLength": 800
+                  },
+                  "startDate": {
+                    "type": "string",
+                    "format": "date",
+                    "description": "Earliest start, YYYY-MM-DD. Defaults to tomorrow."
+                  },
+                  "photo": {
+                    "type": "string",
+                    "format": "binary"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/JobCreated"
+          },
+          "413": {
+            "$ref": "#/components/responses/TooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMedia"
+          },
+          "422": {
+            "$ref": "#/components/responses/Validation"
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/projects/sample": {
+      "post": {
+        "tags": [
+          "Projects"
+        ],
+        "operationId": "createSampleProject",
+        "summary": "Create the sample kitchen project",
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/JobCreated"
+          }
+        },
+        "security": []
+      }
+    },
+    "/api/v1/jobs/{id}/milestones": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/JobId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "Milestones"
+        ],
+        "operationId": "listMilestones",
+        "summary": "List a project's milestones (customer, staff)",
+        "security": [
+          {
+            "jobKey": []
+          },
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Milestone"
+                      }
+                    },
+                    "progress": {
+                      "type": "object"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Milestones"
+        ],
+        "operationId": "addMilestone",
+        "summary": "Add a milestone before the hold is placed (staff)",
+        "security": [
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "title",
+                  "detail",
+                  "crewId",
+                  "amountUsd",
+                  "startsAt",
+                  "endsAt"
+                ],
+                "properties": {
+                  "title": {
+                    "type": "string"
+                  },
+                  "detail": {
+                    "type": "string"
+                  },
+                  "crewId": {
+                    "type": "string"
+                  },
+                  "amountUsd": {
+                    "type": "number",
+                    "minimum": 1,
+                    "maximum": 10000
+                  },
+                  "startsAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "endsAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/Job"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Validation"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/milestones/{mid}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/JobId"
+        },
+        {
+          "$ref": "#/components/parameters/MilestoneId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "Milestones"
+        ],
+        "operationId": "getMilestone",
+        "summary": "Read one milestone (customer, its crew member, staff)",
+        "security": [
+          {
+            "jobKey": []
+          },
+          {
+            "crewKey": []
+          },
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Milestone"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "Milestones"
+        ],
+        "operationId": "updateMilestone",
+        "summary": "Move, reassign, reprice, or change verification (staff)",
+        "description": "Only scheduled milestones change. Prices lock once the hold is placed. The Bryntum board sends crewId, startsAt, and endsAt on every drag.",
+        "security": [
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "minProperties": 1,
+                "properties": {
+                  "crewId": {
+                    "type": "string"
+                  },
+                  "title": {
+                    "type": "string"
+                  },
+                  "startsAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "endsAt": {
+                    "type": "string",
+                    "format": "date-time"
+                  },
+                  "amountUsd": {
+                    "type": "number"
+                  },
+                  "verification": {
+                    "$ref": "#/components/schemas/VerificationMode"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Milestone"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Validation"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/milestones/{mid}/proof": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/JobId"
+        },
+        {
+          "$ref": "#/components/parameters/MilestoneId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "Milestones"
+        ],
+        "operationId": "submitMilestoneProof",
+        "summary": "Post the photo that proves a milestone (crew)",
+        "description": "ai milestones that pass the check are captured and paid at once. Everything else goes to a person. A photo already used on the project is rejected.",
+        "security": [
+          {
+            "crewKey": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "photo"
+                ],
+                "properties": {
+                  "photo": {
+                    "type": "string",
+                    "format": "binary"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Checked",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Milestone"
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "413": {
+            "$ref": "#/components/responses/TooLarge"
+          },
+          "415": {
+            "$ref": "#/components/responses/UnsupportedMedia"
+          },
+          "422": {
+            "$ref": "#/components/responses/Validation"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/milestones/{mid}/proof/sample": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/JobId"
+        },
+        {
+          "$ref": "#/components/parameters/MilestoneId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "Milestones"
+        ],
+        "operationId": "submitSampleMilestoneProof",
+        "summary": "Post a bundled sample photo on a sample project (crew)",
+        "security": [
+          {
+            "crewKey": []
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Checked",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Milestone"
+                }
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/milestones/{mid}/approve": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/JobId"
+        },
+        {
+          "$ref": "#/components/parameters/MilestoneId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "Milestones"
+        ],
+        "operationId": "approveMilestone",
+        "summary": "Approve a milestone: partial capture and crew payout (staff)",
+        "description": "Captures this milestone's amount from the authorization with final_capture false, or true on the last open milestone, then sends a PayPal payout to the crew member minus the platform fee.",
+        "security": [
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Job"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/milestones/{mid}/reject": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/JobId"
+        },
+        {
+          "$ref": "#/components/parameters/MilestoneId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "Milestones"
+        ],
+        "operationId": "rejectMilestone",
+        "summary": "Send a milestone back to the crew with a note (staff)",
+        "security": [
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "note"
+                ],
+                "properties": {
+                  "note": {
+                    "type": "string",
+                    "minLength": 4,
+                    "maxLength": 300
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Job"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Validation"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/milestones/{mid}/payout/retry": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/JobId"
+        },
+        {
+          "$ref": "#/components/parameters/MilestoneId"
+        }
+      ],
+      "post": {
+        "tags": [
+          "Milestones"
+        ],
+        "operationId": "retryMilestonePayout",
+        "summary": "Retry a failed milestone payout (staff)",
+        "security": [
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Job"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          }
+        }
+      }
+    },
+    "/api/v1/jobs/{id}/milestones/{mid}/photos/{slot}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/JobId"
+        },
+        {
+          "$ref": "#/components/parameters/MilestoneId"
+        },
+        {
+          "name": "slot",
+          "in": "path",
+          "required": true,
+          "schema": {
+            "type": "string",
+            "enum": [
+              "site",
+              "proof"
+            ]
+          }
+        }
+      ],
+      "get": {
+        "tags": [
+          "Milestones"
+        ],
+        "operationId": "getMilestonePhoto",
+        "summary": "Site photo or milestone proof photo",
+        "description": "Accepts ?k= with a job or crew key, because img tags cannot send headers.",
+        "security": [
+          {
+            "jobKey": []
+          },
+          {
+            "crewKey": []
+          },
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Image",
+            "content": {
+              "image/png": {},
+              "image/jpeg": {},
+              "image/webp": {}
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        }
+      }
+    },
+    "/api/v1/crew": {
+      "get": {
+        "tags": [
+          "Crew"
+        ],
+        "operationId": "listCrew",
+        "summary": "List the crew roster (staff)",
+        "security": [
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Crew"
+                      }
+                    },
+                    "count": {
+                      "type": "integer"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "description": "Every crew member with their PayPal email, portal link, and workload. Staff use this to send a crew member their portal link; the same data backs the Crew page at /crew."
+      },
+      "post": {
+        "tags": [
+          "Crew"
+        ],
+        "operationId": "createCrew",
+        "summary": "Add a crew member (staff)",
+        "security": [
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "allOf": [
+                  {
+                    "$ref": "#/components/schemas/CrewInput"
+                  },
+                  {
+                    "required": [
+                      "name",
+                      "trade",
+                      "email"
+                    ]
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Crew"
+                }
+              }
+            }
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Validation"
+          }
+        }
+      }
+    },
+    "/api/v1/crew/{id}": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/CrewId"
+        }
+      ],
+      "get": {
+        "tags": [
+          "Crew"
+        ],
+        "operationId": "getCrew",
+        "summary": "Read a crew member (staff)",
+        "security": [
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Crew"
+                }
+              }
+            }
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          }
+        },
+        "description": "One crew member with their portal link and workload."
+      },
+      "patch": {
+        "tags": [
+          "Crew"
+        ],
+        "operationId": "updateCrew",
+        "summary": "Update a crew member (staff)",
+        "security": [
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CrewInput"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Crew"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/BadRequest"
+          },
+          "404": {
+            "$ref": "#/components/responses/NotFound"
+          },
+          "409": {
+            "$ref": "#/components/responses/Conflict"
+          },
+          "422": {
+            "$ref": "#/components/responses/Validation"
+          }
+        }
+      }
+    },
+    "/api/v1/crew/me": {
+      "get": {
+        "tags": [
+          "Crew"
+        ],
+        "operationId": "getMyAssignments",
+        "summary": "A crew member's own milestones and earnings (crew)",
+        "security": [
+          {
+            "crewKey": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "crew": {
+                      "$ref": "#/components/schemas/CrewRef"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Milestone"
+                      }
+                    },
+                    "earnedUsd": {
+                      "type": "number"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/v1/schedule": {
+      "get": {
+        "tags": [
+          "Dispatch"
+        ],
+        "operationId": "getSchedule",
+        "summary": "Crew and milestones for the Bryntum Scheduler (staff)",
+        "security": [
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Schedule"
+                }
+              }
+            }
+          },
+          "401": {
+            "$ref": "#/components/responses/Unauthorized"
+          }
+        }
+      }
+    },
+    "/api/v1/copilot": {
+      "post": {
+        "tags": [
+          "Dispatch"
+        ],
+        "operationId": "askCopilot",
+        "summary": "Ask the AI dispatch copilot (staff)",
+        "description": "Vercel AI SDK generateText with up to 8 tool steps. Board tools: list_projects, list_crew, reschedule_milestone, assign_milestone, set_verification. With PayPal keys it also gets PayPal Agent Toolkit tools: get_order, list_transactions, create_invoice, send_invoice, list_invoices, get_invoice.",
+        "security": [
+          {
+            "staffKey": []
+          },
+          {
+            "staffCookie": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": [
+                  "messages"
+                ],
+                "properties": {
+                  "messages": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 20,
+                    "items": {
+                      "type": "object",
+                      "required": [
+                        "role",
+                        "content"
+                      ],
+                      "properties": {
+                        "role": {
+                          "type": "string",
+                          "enum": [
+                            "user",
+                            "assistant"
+                          ]
+                        },
+                        "content": {
+                          "type": "string",
+                          "maxLength": 2000
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Reply",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "reply": {
+                      "type": "string"
+                    },
+                    "actions": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "tool": {
+                            "type": "string"
+                          },
+                          "ok": {
+                            "type": "boolean"
+                          },
+                          "summary": {
+                            "type": "string"
+                          }
+                        }
+                      }
+                    },
+                    "changedSchedule": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "422": {
+            "$ref": "#/components/responses/Validation"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "jobKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The customer key or the technician key for one job."
+      },
+      "staffKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "The server's FIXSURE_STAFF_KEY."
+      },
+      "staffCookie": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "fixsure_staff",
+        "description": "Set by POST /api/v1/session. Writes also need a same-origin Origin header."
+      },
+      "crewKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "A crew member's portal key. It only reaches milestones booked to that crew member."
+      }
+    },
+    "parameters": {
+      "JobId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      },
+      "MilestoneId": {
+        "name": "mid",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "pattern": "^[a-z0-9]{8}$"
+        }
+      },
+      "CrewId": {
+        "name": "id",
+        "in": "path",
+        "required": true,
+        "schema": {
+          "type": "string",
+          "format": "uuid"
+        }
+      }
+    },
+    "responses": {
+      "Job": {
+        "description": "The job.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Job"
+            }
+          }
+        }
+      },
+      "JobCreated": {
+        "description": "Job created and priced.",
+        "headers": {
+          "Location": {
+            "schema": {
+              "type": "string"
+            },
+            "description": "URL of the new job."
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Job"
+            }
+          }
+        }
+      },
+      "JobChecked": {
+        "description": "Proof stored and judged. `status` is `released` or `review`.",
+        "headers": {
+          "Location": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Job"
+            }
+          }
+        }
+      },
+      "BadRequest": {
+        "description": "Malformed request.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Unauthorized": {
+        "description": "No credential was sent.",
+        "headers": {
+          "WWW-Authenticate": {
+            "schema": {
+              "type": "string"
+            }
+          }
+        },
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "The credential's role cannot do this.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "No such job for this key.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Conflict": {
+        "description": "The job is in the wrong state for this action.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "TooLarge": {
+        "description": "Photo over 5 MB.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "UnsupportedMedia": {
+        "description": "Wrong content type or image format.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Validation": {
+        "description": "One or more fields are invalid.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Upstream": {
+        "description": "PayPal or another provider failed.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      },
+      "Unavailable": {
+        "description": "The feature needs a key this server does not have.",
+        "content": {
+          "application/problem+json": {
+            "schema": {
+              "$ref": "#/components/schemas/Problem"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Problem": {
+        "type": "object",
+        "description": "RFC 9457 problem details.",
+        "required": [
+          "type",
+          "title",
+          "status",
+          "detail"
+        ],
+        "properties": {
+          "type": {
+            "type": "string",
+            "examples": [
+              "/docs#problem-conflict"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "status": {
+            "type": "integer"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "instance": {
+            "type": "string"
+          },
+          "errors": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "field",
+                "message"
+              ],
+              "properties": {
+                "field": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Status": {
+        "type": "string",
+        "enum": [
+          "scoped",
+          "funded",
+          "review",
+          "released",
+          "voided"
+        ]
+      },
+      "Scope": {
+        "type": "object",
+        "required": [
+          "title",
+          "trade",
+          "summary",
+          "priceUsd",
+          "lineItems",
+          "confidence",
+          "assumptions",
+          "source"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "trade": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          },
+          "priceUsd": {
+            "type": "number"
+          },
+          "lineItems": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "amountUsd"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "amountUsd": {
+                  "type": "number"
+                }
+              }
+            }
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "assumptions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "openai",
+              "fallback"
+            ]
+          }
+        }
+      },
+      "Verdict": {
+        "type": "object",
+        "required": [
+          "sameJob",
+          "issueAddressed",
+          "confidence",
+          "notes",
+          "decision",
+          "source"
+        ],
+        "properties": {
+          "sameJob": {
+            "type": "boolean"
+          },
+          "issueAddressed": {
+            "type": "boolean"
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "notes": {
+            "type": "string"
+          },
+          "decision": {
+            "type": "string",
+            "enum": [
+              "release",
+              "review"
+            ]
+          },
+          "source": {
+            "type": "string",
+            "enum": [
+              "openai",
+              "fallback"
+            ]
+          }
+        }
+      },
+      "Job": {
+        "type": "object",
+        "required": [
+          "id",
+          "status",
+          "statusLabel",
+          "createdAt",
+          "scope",
+          "money",
+          "photos",
+          "events",
+          "links"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "status": {
+            "$ref": "#/components/schemas/Status"
+          },
+          "statusLabel": {
+            "type": "string"
+          },
+          "sample": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "customerName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "city": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/Scope"
+          },
+          "verdict": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Verdict"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "releaseThreshold": {
+            "type": "number",
+            "examples": [
+              0.82
+            ]
+          },
+          "money": {
+            "type": "object",
+            "properties": {
+              "priceUsd": {
+                "type": "number"
+              },
+              "feeUsd": {
+                "type": "number"
+              },
+              "payoutUsd": {
+                "type": "number"
+              },
+              "currency": {
+                "const": "USD"
+              }
+            }
+          },
+          "hold": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "demo",
+                  "sandbox",
+                  "live"
+                ]
+              },
+              "orderId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "authorizationId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "authorizationExpiresAt": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              },
+              "captureId": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "approveUrl": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "uri"
+              }
+            }
+          },
+          "payout": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "mode": {
+                "type": "string"
+              },
+              "amountUsd": {
+                "type": "number"
+              },
+              "feeUsd": {
+                "type": "number"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "sent",
+                  "failed",
+                  "demo"
+                ]
+              },
+              "attempt": {
+                "type": "integer"
+              },
+              "batchId": {
+                "type": "string"
+              },
+              "error": {
+                "type": "string"
+              }
+            }
+          },
+          "technicianEmail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "photos": {
+            "type": "object",
+            "properties": {
+              "before": {
+                "type": "string"
+              },
+              "after": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "at": {
+                  "type": "string",
+                  "format": "date-time"
+                },
+                "type": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "links": {
+            "type": "object",
+            "description": "Page links. `customer` and `technician` carry that role's key in `?k=`.",
+            "properties": {
+              "self": {
+                "type": "string"
+              },
+              "customer": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "technician": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "review": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "repair",
+              "project"
+            ]
+          },
+          "project": {
+            "$ref": "#/components/schemas/Project"
+          }
+        }
+      },
+      "JobRow": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "title": {
+            "type": "string"
+          },
+          "trade": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "customerName": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/Status"
+          },
+          "statusLabel": {
+            "type": "string"
+          },
+          "priceUsd": {
+            "type": "number"
+          },
+          "payoutUsd": {
+            "type": "number"
+          },
+          "confidence": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "decision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "release",
+              "review",
+              null
+            ]
+          },
+          "scopeSource": {
+            "type": "string"
+          },
+          "paypalMode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "payoutStatus": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sample": {
+            "type": "boolean"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "technicianUrl": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "repair",
+              "project"
+            ]
+          },
+          "milestones": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Paid over total, like 2/4."
+          },
+          "awaiting": {
+            "type": "integer",
+            "description": "Milestones waiting on a person."
+          }
+        }
+      },
+      "Similar": {
+        "type": "object",
+        "required": [
+          "source",
+          "jobs",
+          "medianPaidUsd"
+        ],
+        "properties": {
+          "source": {
+            "type": "string",
+            "enum": [
+              "elastic",
+              "local"
+            ]
+          },
+          "medianPaidUsd": {
+            "type": [
+              "number",
+              "null"
+            ]
+          },
+          "jobs": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "title": {
+                  "type": "string"
+                },
+                "trade": {
+                  "type": "string"
+                },
+                "city": {
+                  "type": "string"
+                },
+                "priceUsd": {
+                  "type": "number"
+                },
+                "status": {
+                  "$ref": "#/components/schemas/Status"
+                },
+                "score": {
+                  "type": "number"
+                }
+              }
+            }
+          }
+        }
+      },
+      "Health": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "const": "ok"
+          },
+          "version": {
+            "type": "string"
+          },
+          "time": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "integrations": {
+            "type": "object",
+            "properties": {
+              "vision": {
+                "type": "string",
+                "enum": [
+                  "openai",
+                  "fallback"
+                ]
+              },
+              "paypal": {
+                "type": "string",
+                "enum": [
+                  "demo",
+                  "sandbox",
+                  "live"
+                ]
+              },
+              "elastic": {
+                "type": "string",
+                "enum": [
+                  "elastic",
+                  "local"
+                ]
+              },
+              "zapier": {
+                "type": "string",
+                "enum": [
+                  "connected",
+                  "off"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "VerificationMode": {
+        "type": "string",
+        "enum": [
+          "ai",
+          "ai_then_human",
+          "human"
+        ],
+        "description": "ai: a passing AI check releases the milestone. ai_then_human: the AI checks, a person approves. human: a person only."
+      },
+      "Payout": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "demo",
+              "sandbox",
+              "live"
+            ]
+          },
+          "amountUsd": {
+            "type": "number"
+          },
+          "feeUsd": {
+            "type": "number"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "sent",
+              "failed",
+              "demo"
+            ]
+          },
+          "attempt": {
+            "type": "integer"
+          },
+          "batchId": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "CrewRef": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "trade": {
+            "type": "string"
+          },
+          "color": {
+            "type": "string"
+          }
+        }
+      },
+      "Milestone": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "amountUsd",
+          "status",
+          "verification",
+          "startsAt",
+          "endsAt"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "amountUsd": {
+            "type": "number"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "scheduled",
+              "review",
+              "paid",
+              "cancelled"
+            ]
+          },
+          "statusLabel": {
+            "type": "string"
+          },
+          "verification": {
+            "$ref": "#/components/schemas/VerificationMode"
+          },
+          "verificationLabel": {
+            "type": "string"
+          },
+          "startsAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "endsAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "crew": {
+            "$ref": "#/components/schemas/CrewRef"
+          },
+          "verdict": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Verdict"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "paidAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "captureId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Staff only."
+          },
+          "payout": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Payout"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "photo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Proof photo URL."
+          }
+        }
+      },
+      "Project": {
+        "type": [
+          "object",
+          "null"
+        ],
+        "description": "Present on milestone projects, null on single repairs.",
+        "properties": {
+          "plan": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "properties": {
+              "source": {
+                "type": "string",
+                "enum": [
+                  "agent",
+                  "fallback"
+                ]
+              },
+              "notes": {
+                "type": "string"
+              }
+            }
+          },
+          "progress": {
+            "type": "object",
+            "properties": {
+              "paidUsd": {
+                "type": "number"
+              },
+              "heldUsd": {
+                "type": "number"
+              },
+              "totalUsd": {
+                "type": "number"
+              },
+              "paidCount": {
+                "type": "integer"
+              },
+              "count": {
+                "type": "integer"
+              },
+              "percent": {
+                "type": "integer"
+              }
+            }
+          },
+          "milestones": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Milestone"
+            }
+          }
+        }
+      },
+      "Crew": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "trade": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string",
+            "format": "email"
+          },
+          "color": {
+            "type": "string"
+          },
+          "portalUrl": {
+            "type": "string",
+            "description": "Carries the crew key. Staff only."
+          },
+          "workload": {
+            "$ref": "#/components/schemas/CrewWorkload",
+            "description": "Returned by GET /api/v1/crew and GET /api/v1/crew/{id}; left out of create and update responses."
+          }
+        }
+      },
+      "CrewInput": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 60
+          },
+          "trade": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 40
+          },
+          "email": {
+            "type": "string",
+            "format": "email",
+            "description": "PayPal email payouts go to."
+          },
+          "color": {
+            "type": "string",
+            "enum": [
+              "blue",
+              "teal",
+              "orange",
+              "violet",
+              "green",
+              "red",
+              "pink",
+              "indigo",
+              "lime",
+              "amber"
+            ]
+          }
+        }
+      },
+      "ScheduleEvent": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "description": "{jobId}:{milestoneId}"
+          },
+          "resourceId": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "startDate": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "endDate": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "draggable": {
+            "type": "boolean"
+          },
+          "resizable": {
+            "type": "boolean"
+          },
+          "jobId": {
+            "type": "string"
+          },
+          "milestoneId": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "amountUsd": {
+            "type": "number"
+          },
+          "verification": {
+            "$ref": "#/components/schemas/VerificationMode"
+          }
+        }
+      },
+      "Schedule": {
+        "type": "object",
+        "description": "Loads straight into a Bryntum Scheduler: crew as resources, milestones as events.",
+        "properties": {
+          "resources": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "trade": {
+                  "type": "string"
+                },
+                "eventColor": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScheduleEvent"
+            }
+          }
+        }
+      },
+      "CrewWorkload": {
+        "type": "object",
+        "description": "What the crew member has on their plate across every project. Cancelled milestones and voided projects are left out.",
+        "properties": {
+          "readyForProof": {
+            "type": "integer",
+            "description": "Scheduled milestones on funded projects. The crew member can upload proof for these now."
+          },
+          "awaitingHold": {
+            "type": "integer",
+            "description": "Scheduled milestones on projects the customer has not funded yet."
+          },
+          "inReview": {
+            "type": "integer",
+            "description": "Milestones whose proof is waiting on a person."
+          },
+          "paid": {
+            "type": "integer"
+          },
+          "failedPayouts": {
+            "type": "integer",
+            "description": "Paid milestones whose PayPal payout failed, usually a wrong email."
+          },
+          "bookedDays": {
+            "type": "integer",
+            "description": "Calendar days covered by open (scheduled or in review) milestones."
+          },
+          "earnedUsd": {
+            "type": "number",
+            "description": "Sum of payouts that did not fail."
+          },
+          "next": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The earliest scheduled milestone.",
+            "properties": {
+              "jobId": {
+                "type": "string"
+              },
+              "project": {
+                "type": "string"
+              },
+              "milestone": {
+                "type": "string"
+              },
+              "startsAt": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "funded": {
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

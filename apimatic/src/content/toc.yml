@@ -1,0 +1,17 @@
+toc:
+  - group: Getting Started
+    items:
+      - generate: How to Get Started
+        from: getting-started
+  - group: Design
+    items:
+      - page: High-level design
+        file: guides/high-level-design.md
+      - page: Low-level design
+        file: guides/low-level-design.md
+  - generate: API Endpoints
+    from: endpoints
+  - generate: Models
+    from: models
+  - generate: SDK Infrastructure
+    from: sdk-infra

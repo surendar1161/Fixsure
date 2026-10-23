@@ -1,0 +1,1077 @@
+{
+  "info": {
+    "name": "Fixsure API v1",
+    "description": "Fixsure keeps the customer's money as a PayPal authorization and captures it only when a photo proves the work.\n\n## Run it\n\nSet `baseUrl` (for example `http://localhost:3000`) and `staffKey`, then run the collection in order. Every other variable is filled in by the test scripts.\n\n- **Requests 1 to 13, repair loop:** sample job, hold, sample after photo, review list, similar jobs, release, final state. Includes the 401, 403, and 409 checks.\n- **Requests 14 to 23, project loop:** sample project, crew roster, project hold, crew milestone proof, crew feed, Bryntum schedule, staff approval. Includes the 403 and 409 checks.\n\n## Who can call what\n\n| Credential | Variable | Reaches |\n| --- | --- | --- |\n| Customer key | `customerKey`, `projectKey` | Their job: hold, cancel, milestones |\n| Technician key | `techKey` | The after photo on that repair |\n| Crew key | `crewKey` | Only milestones booked to that crew member |\n| Staff key | `staffKey` | Review, schedule, copilot, crew, approve, reject, release, void |\n\nA key that does not belong to the job returns 404.\n\n## How a milestone is released\n\n| Verification | When | Release |\n| --- | --- | --- |\n| `ai` | Amount up to $400 | AI check: same site, work done, confidence at least 0.82 |\n| `ai_then_human` | Amount above $400 | AI verdict recorded, a person approves |\n| `human` | Step a photo cannot prove | A person only |\n\nEach released milestone is a partial PayPal capture of its amount, then a payout to its crew member minus the platform fee. The last one is the final capture. Stopping a project voids the rest.\n\n## Design\n\nThe high-level and low-level design with diagrams are served by the app at `{{baseUrl}}/docs/design/hld` and `{{baseUrl}}/docs/design/lld`, and live in the repo under `docs/`.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:3000"
+    },
+    {
+      "key": "staffKey",
+      "value": "local-staff-key"
+    },
+    {
+      "key": "jobId",
+      "value": ""
+    },
+    {
+      "key": "customerKey",
+      "value": ""
+    },
+    {
+      "key": "techKey",
+      "value": ""
+    },
+    {
+      "key": "projectId",
+      "value": ""
+    },
+    {
+      "key": "projectKey",
+      "value": ""
+    },
+    {
+      "key": "milestoneId",
+      "value": ""
+    },
+    {
+      "key": "milestoneCrewId",
+      "value": ""
+    },
+    {
+      "key": "crewKey",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/health",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "health"
+          ]
+        },
+        "description": "",
+        "auth": {
+          "type": "noauth"
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+              "pm.test(\"reports integrations\", () => pm.expect(pm.response.json().integrations).to.have.keys(\"vision\", \"paypal\", \"elastic\", \"zapier\"));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Create sample job",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/jobs/sample",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobs",
+            "sample"
+          ]
+        },
+        "description": "Creates the bundled faucet job and stores jobId and customerKey.",
+        "auth": {
+          "type": "noauth"
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"201 Created with Location\", () => {",
+              "  pm.response.to.have.status(201);",
+              "  pm.expect(pm.response.headers.get(\"Location\")).to.match(/^\\/api\\/v1\\/jobs\\//);",
+              "});",
+              "const job = pm.response.json();",
+              "const keyOf = (link) => new URL(link, \"http://x\").searchParams.get(\"k\");",
+              "pm.collectionVariables.set(\"jobId\", job.id);",
+              "pm.collectionVariables.set(\"customerKey\", keyOf(job.links.customer));",
+              "pm.test(\"priced and waiting for a hold\", () => pm.expect(job.status).to.eql(\"scoped\"));",
+              "pm.test(\"customer view hides the technician link\", () => pm.expect(job.links.technician).to.eql(null));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Get job without a key (401)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/jobs/{{jobId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobs",
+            "{{jobId}}"
+          ]
+        },
+        "description": "",
+        "auth": {
+          "type": "noauth"
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"401 problem+json\", () => {",
+              "  pm.response.to.have.status(401);",
+              "  pm.expect(pm.response.headers.get(\"Content-Type\")).to.include(\"application/problem+json\");",
+              "  pm.expect(pm.response.headers.get(\"WWW-Authenticate\")).to.include(\"Bearer\");",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Get job as customer",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/jobs/{{jobId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobs",
+            "{{jobId}}"
+          ]
+        },
+        "description": "",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{customerKey}}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+              "pm.test(\"has a priced scope\", () => pm.expect(pm.response.json().scope.priceUsd).to.be.above(0));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Place hold (customer)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/jobs/{{jobId}}/hold",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobs",
+            "{{jobId}}",
+            "hold"
+          ]
+        },
+        "description": "200 in demo mode. 202 with hold.approveUrl when PayPal sandbox keys are set; open that URL to approve.",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{customerKey}}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"200 or 202\", () => pm.expect(pm.response.code).to.be.oneOf([200, 202]));",
+              "if (pm.response.code === 202) console.log(\"Approve on PayPal:\", pm.response.json().hold.approveUrl);"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Place hold again (409)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/jobs/{{jobId}}/hold",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobs",
+            "{{jobId}}",
+            "hold"
+          ]
+        },
+        "description": "",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{customerKey}}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"409 conflict once funded\", () => {",
+              "  if (pm.response.code === 202) return; // still waiting for PayPal approval",
+              "  pm.response.to.have.status(409);",
+              "  pm.expect(pm.response.json().type).to.eql(\"/docs#problem-conflict\");",
+              "});"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Get job as staff",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/jobs/{{jobId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobs",
+            "{{jobId}}"
+          ]
+        },
+        "description": "Staff see the technician link; this saves the technician key.",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{staffKey}}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+              "const keyOf = (link) => new URL(link, \"http://x\").searchParams.get(\"k\");",
+              "const link = pm.response.json().links.technician;",
+              "if (link) pm.collectionVariables.set(\"techKey\", keyOf(link));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Submit sample proof (technician)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/jobs/{{jobId}}/proof/sample",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobs",
+            "{{jobId}}",
+            "proof",
+            "sample"
+          ]
+        },
+        "description": "",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{techKey}}",
+              "type": "string"
+            }
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"tech@example.com\"\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"201 Created\", () => pm.response.to.have.status(201));",
+              "pm.test(\"judged\", () => pm.expect(pm.response.json().status).to.be.oneOf([\"review\", \"released\"]));",
+              "pm.test(\"technician view hides the customer name\", () => pm.expect(pm.response.json().customerName).to.eql(null));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Customer cannot submit proof (403)",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/jobs/{{jobId}}/proof/sample",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobs",
+            "{{jobId}}",
+            "proof",
+            "sample"
+          ]
+        },
+        "description": "",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{customerKey}}",
+              "type": "string"
+            }
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"403 forbidden\", () => pm.response.to.have.status(403));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "List jobs in review (staff)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/jobs?status=review",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobs"
+          ],
+          "query": [
+            {
+              "key": "status",
+              "value": "review"
+            }
+          ]
+        },
+        "description": "",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{staffKey}}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+              "pm.test(\"only review rows\", () => pm.response.json().data.forEach((row) => pm.expect(row.status).to.eql(\"review\")));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Similar jobs (staff)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/jobs/{{jobId}}/similar",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobs",
+            "{{jobId}}",
+            "similar"
+          ]
+        },
+        "description": "",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{staffKey}}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"200 OK\", () => pm.response.to.have.status(200));",
+              "pm.test(\"names its source\", () => pm.expect(pm.response.json().source).to.be.oneOf([\"elastic\", \"local\"]));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Release (staff)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/jobs/{{jobId}}/release",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobs",
+            "{{jobId}}",
+            "release"
+          ]
+        },
+        "description": "",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{staffKey}}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"200, or 409 if it auto-released\", () => pm.expect(pm.response.code).to.be.oneOf([200, 409]));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Final state",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/jobs/{{jobId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobs",
+            "{{jobId}}"
+          ]
+        },
+        "description": "",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{staffKey}}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"paid\", () => pm.expect(pm.response.json().status).to.eql(\"released\"));",
+              "pm.test(\"payout recorded\", () => pm.expect(pm.response.json().payout.status).to.be.oneOf([\"sent\", \"demo\"]));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Create sample project",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/projects/sample",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "projects",
+            "sample"
+          ]
+        },
+        "description": "",
+        "auth": {
+          "type": "noauth"
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"201\", () => pm.response.to.have.status(201));",
+              "const job = pm.response.json();",
+              "pm.test(\"is a project\", () => pm.expect(job.kind).to.eql(\"project\"));",
+              "pm.collectionVariables.set(\"projectId\", job.id);",
+              "pm.collectionVariables.set(\"projectKey\", new URL(job.links.customer, \"http://x\").searchParams.get(\"k\"));",
+              "const first = job.project.milestones[0];",
+              "pm.collectionVariables.set(\"milestoneId\", first.id);",
+              "pm.collectionVariables.set(\"milestoneCrewId\", first.crew.id);",
+              "pm.test(\"three verification modes\", () => pm.expect(new Set(job.project.milestones.map((m) => m.verification)).size).to.eql(3));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Crew roster (staff)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/crew",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "crew"
+          ]
+        },
+        "description": "",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{staffKey}}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"200\", () => pm.response.to.have.status(200));",
+              "const member = pm.response.json().data.find((c) => c.id === pm.collectionVariables.get(\"milestoneCrewId\"));",
+              "pm.collectionVariables.set(\"crewKey\", new URL(member.portalUrl, \"http://x\").searchParams.get(\"k\"));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Proof before the hold (409)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/jobs/{{projectId}}/milestones/{{milestoneId}}/proof/sample",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobs",
+            "{{projectId}}",
+            "milestones",
+            "{{milestoneId}}",
+            "proof",
+            "sample"
+          ]
+        },
+        "description": "",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{crewKey}}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"409\", () => pm.response.to.have.status(409));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Place project hold (customer)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/jobs/{{projectId}}/hold",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobs",
+            "{{projectId}}",
+            "hold"
+          ]
+        },
+        "description": "",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{projectKey}}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"held\", () => pm.expect(pm.response.code).to.be.oneOf([200, 202]));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Customer cannot post milestone proof (403)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/jobs/{{projectId}}/milestones/{{milestoneId}}/proof/sample",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobs",
+            "{{projectId}}",
+            "milestones",
+            "{{milestoneId}}",
+            "proof",
+            "sample"
+          ]
+        },
+        "description": "",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{projectKey}}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"403\", () => pm.response.to.have.status(403));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Post sample milestone proof (crew)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/jobs/{{projectId}}/milestones/{{milestoneId}}/proof/sample",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobs",
+            "{{projectId}}",
+            "milestones",
+            "{{milestoneId}}",
+            "proof",
+            "sample"
+          ]
+        },
+        "description": "",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{crewKey}}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"201\", () => pm.response.to.have.status(201));",
+              "pm.test(\"checked\", () => pm.expect(pm.response.json().status).to.be.oneOf([\"review\", \"paid\"]));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Crew assignments (crew)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/crew/me",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "crew",
+            "me"
+          ]
+        },
+        "description": "",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{crewKey}}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"200\", () => pm.response.to.have.status(200));",
+              "pm.test(\"has work\", () => pm.expect(pm.response.json().data.length).to.be.above(0));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Schedule for Bryntum (staff)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/schedule",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "schedule"
+          ]
+        },
+        "description": "",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{staffKey}}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"200\", () => pm.response.to.have.status(200));",
+              "pm.test(\"resources and events\", () => { const b = pm.response.json(); pm.expect(b.resources).to.be.an(\"array\"); pm.expect(b.events).to.be.an(\"array\"); });"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Approve milestone (staff)",
+      "request": {
+        "method": "POST",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/jobs/{{projectId}}/milestones/{{milestoneId}}/approve",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobs",
+            "{{projectId}}",
+            "milestones",
+            "{{milestoneId}}",
+            "approve"
+          ]
+        },
+        "description": "",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{staffKey}}",
+              "type": "string"
+            }
+          ]
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const job = pm.response.json();",
+              "if (pm.response.code === 409) { pm.test(\"already auto-paid\", () => pm.expect(job.status).to.eql(409)); return; }",
+              "pm.test(\"200\", () => pm.response.to.have.status(200));",
+              "const m = job.project.milestones.find((x) => x.id === pm.collectionVariables.get(\"milestoneId\"));",
+              "pm.test(\"paid\", () => pm.expect(m.status).to.eql(\"paid\"));",
+              "pm.test(\"progress moved\", () => pm.expect(job.project.progress.paidUsd).to.be.above(0));"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "name": "Move a paid milestone (409)",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "url": {
+          "raw": "{{baseUrl}}/api/v1/jobs/{{projectId}}/milestones/{{milestoneId}}",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "api",
+            "v1",
+            "jobs",
+            "{{projectId}}",
+            "milestones",
+            "{{milestoneId}}"
+          ]
+        },
+        "description": "",
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{staffKey}}",
+              "type": "string"
+            }
+          ]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\"startsAt\": \"2026-11-02T09:00:00Z\", \"endsAt\": \"2026-11-02T17:00:00Z\"}"
+        }
+      },
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "pm.test(\"409\", () => pm.response.to.have.status(409));"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

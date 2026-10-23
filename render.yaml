@@ -1,0 +1,41 @@
+# Render Blueprint: https://render.com/docs/blueprint-spec
+# Free web service. The free plan has no persistent disk and sleeps when idle,
+# so the job ledger in ./data resets on each restart or deploy. That is fine
+# for a demo; attach a disk (paid plan) and set DATA_DIR to keep jobs.
+services:
+  - type: web
+    name: fixsure
+    runtime: node
+    plan: free
+    region: oregon
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/v1/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: FIXSURE_STAFF_KEY
+        generateValue: true
+      - key: PLATFORM_FEE_PERCENT
+        value: "10"
+      - key: MILESTONE_HUMAN_REVIEW_ABOVE_USD
+        value: "400"
+      - key: PAYPAL_ENV
+        value: sandbox
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+      - key: ELASTIC_URL
+        sync: false
+      - key: ELASTIC_API_KEY
+        sync: false
+      - key: ELASTIC_INDEX
+        value: fixsure-jobs
+      - key: ZAPIER_HOOK_URL
+        sync: false

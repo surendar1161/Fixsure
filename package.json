@@ -1,0 +1,42 @@
+{
+  "name": "fixsure",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Home-repair escrow: a PayPal hold that is captured only when a photo proves the repair is done.",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.9"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "docs:apimatic": "node scripts/sync-apimatic.mjs"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^1.3.24",
+    "@bryntum/scheduler": "npm:@bryntum/scheduler-trial@^7.3.7",
+    "@bryntum/scheduler-react": "^7.3.7",
+    "@paypal/agent-toolkit": "^1.11.0",
+    "ag-grid-community": "^36.2.0",
+    "ag-grid-react": "^36.2.0",
+    "ai": "^4.3.19",
+    "lucide-react": "^1.52.0",
+    "marked": "^18.0.14",
+    "mermaid": "^12.1.0",
+    "next": "16.3.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.0",
+    "typescript": "^5"
+  }
+}

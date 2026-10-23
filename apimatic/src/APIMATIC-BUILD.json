@@ -1,0 +1,11 @@
+{
+  "$schema": "https://titan.apimatic.io/api/build/schema",
+  "buildFileVersion": "1",
+  "generatePortal": {
+    "languageConfig": {
+      "http": {},
+      "typescript": {},
+      "python": {}
+    }
+  }
+}
